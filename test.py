@@ -1,13 +1,10 @@
 from fhm.handi import InputHandler
+from varimp import ReadData
 
 
-def test_single_string():
-    """
-    Test initialization with a single string.
-    """
-
-    obj = InputHandler("protein.pdb")
 
 if __name__ == "__main__":
     obj = InputHandler("protein")
+
+    file = ReadData("../../BILIM/AGORA/data/tuberculosis_ClinPGX.tsv")
     print(obj)
