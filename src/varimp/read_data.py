@@ -1,5 +1,6 @@
 from pathlib import Path
 import pandas as pd
+import logging
 
 class ReadData:
     """Read tabular data from CSV, TSV, and Excel files."""
@@ -148,6 +149,7 @@ class ReadData:
                 f"{missing_columns}. "
                 f"Available columns are: "
                 f"{list(self.data.columns)}"
+                f"Redefine the columns' names in the input file or use the mapping option"
             )
 
         # ---------------------------------------------------------
@@ -311,7 +313,7 @@ class ReadData:
             result = result[
                 result["symbol"].isin(gene_symbols)
             ]
-
+        print(result)
         return result
 
 
