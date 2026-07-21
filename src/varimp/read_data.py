@@ -114,6 +114,7 @@ class ReadData:
 
         if mapping is None:
             mapping = {
+                "var_id":"var_id",
                 "AF": "AF",
                 "symbol": "symbol",
             }
@@ -122,14 +123,15 @@ class ReadData:
         # 2. Validate the mapping
         # ---------------------------------------------------------
 
-        required_keys = {"AF", "symbol"}
+        required_keys = {"var_id", "AF", "symbol"}
 
         if set(mapping.keys()) != required_keys:
             raise ValueError(
                 "The mapping must contain exactly the following keys: "
-                "'AF' and 'symbol'."
+                " 'var_id', 'AF' and 'symbol'."
             )
 
+        varid_column = mapping["var_id"]
         af_column = mapping["AF"]
         symbol_column = mapping["symbol"]
 
@@ -139,7 +141,7 @@ class ReadData:
 
         missing_columns = [
             column
-            for column in [af_column, symbol_column]
+            for column in [ varid_column , af_column, symbol_column]
             if column not in self.data.columns
         ]
 
@@ -157,12 +159,13 @@ class ReadData:
         # ---------------------------------------------------------
 
         result = self.data[
-            [symbol_column, af_column]
+            [ varid_column, symbol_column, af_column]
         ].copy()
 
         # Standardize the column names
         result = result.rename(
             columns={
+                varid_column: "var_id",
                 symbol_column: "symbol",
                 af_column: "AF",
             }
@@ -205,8 +208,26 @@ class ReadData:
             & ~missing_symbol
         )
 
+        # ---------------------------------------------------------
+        # 7. Validate the var_id column
+        # ---------------------------------------------------------
+
+        missing_varid = result["var_id"].isna()
+
+        # Convert values to strings where possible
+        converted_varid = result["var_id"].astype("string")
+
+        # A value is considered invalid if it is not a string
+        invalid_varid = (
+            ~result["var_id"].map(lambda x: isinstance(x, str))
+            & ~missing_varid
+        )
+
         n_missing_symbol = missing_symbol.sum()
         n_invalid_symbol = invalid_symbol.sum()
+        
+        n_missing_varid = missing_varid.sum()
+        n_invalid_varid = invalid_varid.sum()
 
         # ---------------------------------------------------------
         # 7. Strict validation
@@ -238,6 +259,17 @@ class ReadData:
                     f"{n_invalid_symbol} symbol values are not strings"
                 )
 
+            if n_missing_varid > 0:
+                problems.append(
+                    f"{n_missing_varid} missing values in the "
+                    "symbol column"
+                )
+
+            if n_invalid_varid > 0:
+                problems.append(
+                    f"{n_invalid_varid} symbol values are not strings"
+                )
+            
             if problems:
                 message = (
                     "Data validation failed:\n- "
@@ -280,6 +312,16 @@ class ReadData:
                 n_missing_symbol,
             )
 
+            logging.warning(
+                "Symbol values that are not strings: %d",
+                n_invalid_varid,
+            )
+
+            logging.warning(
+                "Missing symbol values: %d",
+                n_missing_varid,
+            )
+
             # Keep only rows with valid AF values
             valid_af = converted_af.notna()
 
@@ -290,8 +332,15 @@ class ReadData:
                 )
             )
 
+            # Keep only rows with valid string var_id
+            valid_varid = (
+                result["var_id"].map(
+                    lambda x: isinstance(x, str)
+                )
+            )
+
             # Apply the validation
-            valid_rows = valid_af & valid_symbol
+            valid_rows = valid_af & valid_symbol & valid_varid
 
             result = result.loc[valid_rows].copy()
 
@@ -305,6 +354,10 @@ class ReadData:
                 valid_rows
             ]
 
+            # Standardize var_id values as strings
+            result["var_id"] = converted_varid.loc[
+                valid_varid
+            ]
         # ---------------------------------------------------------
         # 9. Apply gene-symbol filtering
         # ---------------------------------------------------------
