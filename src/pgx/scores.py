@@ -31,6 +31,8 @@ class FunctionalVariantScorer:
 
         self._cap_scores: pd.Series | None = None
         self._drp_scores: pd.Series | None = None
+        self._wcap_scores: pd.Series | None = None
+        self._wdrp_scores: pd.Series | None = None
 
     def compute_CAP(self) -> pd.Series:
         """
@@ -132,3 +134,201 @@ class FunctionalVariantScorer:
 
         self._drp_scores = drp_scores
         return drp_scores
+
+    def compute_wCAP(self, gene_coords_path: str) -> pd.Series:
+        """
+        Compute the gene-length-weighted CAP (wCAP) score per gene.
+
+        Building on the cumulative hazard framework (Aalen, 1978), CAP is
+        converted to a hazard, normalized by gene length in kb, and
+        transformed back to the probability scale:
+
+            I(g)         = -ln(CAP(g))
+            I(g, per_kb) = I(g) / (length_kb(g))
+            wCAP(g)      = 1 - exp(-I(g, per_kb))
+
+        Requires ``compute_CAP`` to have been run (called automatically
+        if not already done). Gene lengths are derived from a mandatory
+        coordinate file supplied by the caller (see
+        ``_load_gene_lengths_kb`` for the expected file format).
+
+        Parameters
+        ----------
+        gene_coords_path : str
+            Path to a CSV, TSV, or Excel (.xlsx/.xls) file containing at
+            minimum the columns "symbol", "start", and "end". Gene length
+            is computed as (max(end) - min(start)) / 1000 for each symbol,
+            in case a gene has multiple rows (e.g., multiple transcripts).
+
+        Returns
+        -------
+        pandas.Series
+            Indexed by gene symbol ("symbol"), values are wCAP scores
+            in [0, 1]. Name of the series is "wCAP".
+
+        Raises
+        ------
+        ValueError
+            If the coordinate file is missing "symbol", "start", or "end",
+            or if any gene present in the CAP scores is absent from the
+            coordinate file.
+        """
+        if self._cap_scores is None:
+            self.compute_CAP()
+
+        gene_lengths_kb = self._load_gene_lengths_kb(gene_coords_path)
+
+        missing_genes = sorted(set(self._cap_scores.index) - set(gene_lengths_kb.index))
+        if missing_genes:
+            raise ValueError(
+                "The following gene(s) from the CAP scores were not found "
+                f"in the coordinate file '{gene_coords_path}': "
+                f"{', '.join(missing_genes)}"
+            )
+
+        aligned_lengths_kb = gene_lengths_kb.reindex(self._cap_scores.index)
+
+        # I(g) = -ln(CAP(g)); CAP(g) == 0 correctly yields I(g) = +inf,
+        # which in turn yields wCAP(g) = 1 (a gene with no functional
+        # variants contributes no additional risk, so this edge case is
+        # handled naturally by the math rather than needing a special case).
+        with np.errstate(divide="ignore"):
+            hazard = -np.log(self._cap_scores)
+
+        hazard_per_kb = hazard / aligned_lengths_kb
+        wcap_scores = (1.0 - np.exp(-hazard_per_kb)).rename("wCAP")
+
+        self._wcap_scores = wcap_scores
+        return wcap_scores
+
+    @staticmethod
+    def _load_gene_lengths_kb(gene_coords_path: str) -> pd.Series:
+        """
+        Load a gene coordinate file and compute gene length in kb per symbol.
+
+        Accepts .csv, .tsv, or Excel (.xlsx/.xls) files. The file must
+        contain "symbol", "start", and "end" columns (case-sensitive).
+
+        Returns
+        -------
+        pandas.Series
+            Indexed by "symbol", values are gene lengths in kb.
+
+        Raises
+        ------
+        ValueError
+            If any of "symbol", "start", or "end" is missing from the
+            file, or if the file extension is unsupported.
+        """
+        suffix = gene_coords_path.rsplit(".", 1)[-1].lower()
+        if suffix in ("xlsx", "xls"):
+            coords = pd.read_excel(gene_coords_path)
+        elif suffix == "tsv":
+            coords = pd.read_csv(gene_coords_path, sep="\t")
+        elif suffix == "csv":
+            coords = pd.read_csv(gene_coords_path)
+        else:
+            raise ValueError(
+                f"Unsupported file extension '.{suffix}' for gene "
+                "coordinate file. Expected .csv, .tsv, .xlsx, or .xls."
+            )
+
+        required_cols = {"symbol", "start", "end"}
+        missing_cols = required_cols - set(coords.columns)
+        if missing_cols:
+            raise ValueError(
+                "Gene coordinate file is missing required column(s): "
+                f"{', '.join(sorted(missing_cols))}. Expected columns: "
+                f"{', '.join(sorted(required_cols))}."
+            )
+
+        # A gene may span multiple rows (e.g., multiple transcripts);
+        # take the outer span (min start to max end) as the gene length.
+        span = coords.groupby("symbol").agg(_min_start=("start", "min"), _max_end=("end", "max"))
+        gene_lengths_kb = ((span["_max_end"] - span["_min_start"]).abs() / 1000.0).rename("length_kb")
+
+        return gene_lengths_kb
+
+
+    def compute_wDRP(self, gene_coords_path: str | None = None) -> pd.Series:
+        """
+        Compute the weighted Drug Risk Probability (wDRP) score per drug.
+
+        wDRP(d) = 1 - prod_{g in G_d} wCAP(g)
+
+        where G_d is the set of distinct target genes for drug d. Requires
+        ``compute_wCAP`` to have been run; if it hasn't, ``gene_coords_path``
+        must be supplied so it can be computed here.
+
+        Parameters
+        ----------
+        gene_coords_path : str, optional
+            Path to the gene coordinate file (CSV/TSV/Excel with "symbol",
+            "start", "end" columns), forwarded to ``compute_wCAP`` if wCAP
+            scores haven't already been computed. Not required if
+            ``compute_wCAP`` was already called on this instance.
+
+        Returns
+        -------
+        pandas.Series
+            Indexed by drug_id, values are wDRP scores in [0, 1]. Name
+            of the series is "wDRP".
+
+        Raises
+        ------
+        ValueError
+            If wCAP scores are not yet available and ``gene_coords_path``
+            is not supplied.
+        """
+        if self._wcap_scores is None:
+            if gene_coords_path is None:
+                raise ValueError(
+                    "wCAP scores have not been computed yet. Either call "
+                    "compute_wCAP(gene_coords_path) first, or pass "
+                    "gene_coords_path to compute_wDRP() so it can be "
+                    "computed automatically."
+                )
+            self.compute_wCAP(gene_coords_path)
+
+        # Each distinct gene must contribute to a drug's wDRP exactly once,
+        # even if several of the gene's variants are linked to that same
+        # drug (i.e., appear as separate rows in self.data).
+        gene_drug_pairs = self.data[["symbol", "drug_id"]].drop_duplicates().copy()
+
+        gene_drug_pairs = gene_drug_pairs.merge(
+            self._wcap_scores, left_on="symbol", right_index=True, how="left"
+        )
+
+        unmatched = gene_drug_pairs["wCAP"].isna()
+        if unmatched.any():
+            logger.warning(
+                "%d (gene, drug) pairs have no matching wCAP score and "
+                "will be excluded from wDRP computation.",
+                int(unmatched.sum()),
+            )
+            gene_drug_pairs = gene_drug_pairs.loc[~unmatched]
+
+        # wDRP(d) = 1 - prod(wCAP(g))
+        #         = 1 - exp( sum( log(wCAP(g)) ) )
+        # Same log-space aggregation as compute_DRP. A gene with
+        # wCAP(g) == 0 is a valid input (no functional variants observed,
+        # normalized): log(0) = -inf correctly forces wDRP = 1 for that
+        # drug, so the RuntimeWarning is suppressed rather than treated
+        # as an error.
+        if (gene_drug_pairs["wCAP"] == 0).any():
+            n_zero_wcap = int((gene_drug_pairs["wCAP"] == 0).sum())
+            logger.info(
+                "%d (gene, drug) pairs have wCAP(g) == 0 (gene has no "
+                "functional variants); this correctly forces wDRP = 1 for "
+                "the affected drug(s).",
+                n_zero_wcap,
+            )
+
+        with np.errstate(divide="ignore"):
+            gene_drug_pairs["_log_wcap"] = np.log(gene_drug_pairs["wCAP"])
+
+        log_sum_per_drug = gene_drug_pairs.groupby("drug_id")["_log_wcap"].sum()
+        wdrp_scores = (1.0 - np.exp(log_sum_per_drug)).rename("wDRP")
+
+        self._wdrp_scores = wdrp_scores
+        return wdrp_scores
