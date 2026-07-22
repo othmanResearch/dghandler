@@ -4,12 +4,7 @@ from pgx import ReadData, FunctionalVariantScorer
 if __name__ == "__main__":
     obj = InputHandler("protein")
     file = ReadData("./gene_allele_frequency_50_rows.csv")
-
     print()
-    #file.get_allele_frequency(
-    #    mapping={"AF": "allele_freq", "symbol": "genes", "var_id": "id", "drug_id": "drug_id"},
-    #    strict=False,
-    #)
 
     scorer = FunctionalVariantScorer(
         file,
@@ -17,3 +12,6 @@ if __name__ == "__main__":
         strict=False,
     )
 
+    cap_scores = scorer.compute_CAP()
+    print("CAP scores per gene:")
+    print(cap_scores)
