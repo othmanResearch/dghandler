@@ -58,7 +58,7 @@ class ReadData:
         """Return the loaded data as a pandas DataFrame."""
         return self.data
 
-    def get_allele_frequency(self, mapping=None, gene_symbols=None, strict=True):
+    def get_data_for_scoring(self, mapping=None, gene_symbols=None, strict=True):
         """
         Extract and validate allele-frequency, gene-symbol, variant-id and
         drug-id data.
@@ -427,5 +427,34 @@ class ReadData:
                 result["symbol"].isin(gene_symbols)
             ]
 
-        print(result)
         return result
+
+
+class FunctionalVariantScorer:
+    """
+    Compute CAP (per-gene) and DRP (per-drug) functional-variant risk
+    scores from a ReadData object's standardized variant-annotation table.
+
+    Parameters
+    ----------
+    reader : ReadData
+        An already-constructed ReadData instance. Its
+        ``get_allele_frequency()`` output supplies the standardized
+        "var_id", "symbol", "AF", "drug_id" columns used by this class.
+    mapping, gene_symbols, strict :
+        Forwarded as-is to ``reader.get_allele_frequency()``.
+    """
+
+    def __init__(self, reader: ReadData, mapping=None, gene_symbols=None, strict=True):
+        if not isinstance(reader, ReadData):
+            raise TypeError(
+                f"'reader' must be a ReadData instance, got {type(reader).__name__}."
+            )
+
+        self.reader = reader
+        self.data = reader.get_allele_frequency(
+            mapping=mapping, gene_symbols=gene_symbols, strict=strict
+        )
+
+        self._cap_scores: pd.Series | None = None
+        self._drp_scores: pd.Series | None = None
