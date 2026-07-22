@@ -58,10 +58,10 @@ class ReadData:
         """Return the loaded data as a pandas DataFrame."""
         return self.data
 
-
-    def get_allele_frequency(self, mapping=None, gene_symbols=None, strict=True ):
+    def get_allele_frequency(self, mapping=None, gene_symbols=None, strict=True):
         """
-        Extract and validate allele-frequency and gene-symbol data.
+        Extract and validate allele-frequency, gene-symbol, variant-id and
+        drug-id data.
 
         Parameters
         ----------
@@ -72,11 +72,14 @@ class ReadData:
             Expected keys are:
 
                 {
+                    "var_id": "actual_variant_id_column",
                     "AF": "actual_allele_frequency_column",
                     "symbol": "actual_gene_symbol_column",
+                    "drug_id": "actual_drug_id_column",
                 }
 
-            If None, the default columns "AF" and "symbol" are used.
+            If None, the default columns "var_id", "AF", "symbol" and
+            "drug_id" are used.
 
         gene_symbols : list of str, optional
             List of gene symbols to retain. If None, all genes are retained.
@@ -85,7 +88,7 @@ class ReadData:
             Validation mode.
 
             If True, an error is raised if missing or invalid values are
-            detected in either the AF or symbol column.
+            detected in any of the AF, symbol, var_id or drug_id columns.
 
             If False, values that can be converted are retained and rows
             containing values that cannot be converted or are missing are
@@ -94,10 +97,12 @@ class ReadData:
         Returns
         -------
         pandas.DataFrame
-            A DataFrame containing two standardized columns:
+            A DataFrame containing four standardized columns:
 
+                - "var_id"
                 - "symbol"
                 - "AF"
+                - "drug_id"
 
         Raises
         ------
@@ -114,26 +119,28 @@ class ReadData:
 
         if mapping is None:
             mapping = {
-                "var_id":"var_id",
+                "var_id": "var_id",
                 "AF": "AF",
                 "symbol": "symbol",
+                "drug_id": "drug_id",
             }
 
         # ---------------------------------------------------------
         # 2. Validate the mapping
         # ---------------------------------------------------------
 
-        required_keys = {"var_id", "AF", "symbol"}
+        required_keys = {"var_id", "AF", "symbol", "drug_id"}
 
         if set(mapping.keys()) != required_keys:
             raise ValueError(
                 "The mapping must contain exactly the following keys: "
-                " 'var_id', 'AF' and 'symbol'."
+                " 'var_id', 'AF', 'symbol' and 'drug_id'."
             )
 
         varid_column = mapping["var_id"]
         af_column = mapping["AF"]
         symbol_column = mapping["symbol"]
+        drugid_column = mapping["drug_id"]
 
         # ---------------------------------------------------------
         # 3. Check that the columns exist
@@ -141,7 +148,7 @@ class ReadData:
 
         missing_columns = [
             column
-            for column in [ varid_column , af_column, symbol_column]
+            for column in [varid_column, af_column, symbol_column, drugid_column]
             if column not in self.data.columns
         ]
 
@@ -159,7 +166,7 @@ class ReadData:
         # ---------------------------------------------------------
 
         result = self.data[
-            [ varid_column, symbol_column, af_column]
+            [varid_column, symbol_column, af_column, drugid_column]
         ].copy()
 
         # Standardize the column names
@@ -168,6 +175,7 @@ class ReadData:
                 varid_column: "var_id",
                 symbol_column: "symbol",
                 af_column: "AF",
+                drugid_column: "drug_id",
             }
         )
 
@@ -208,6 +216,9 @@ class ReadData:
             & ~missing_symbol
         )
 
+        n_missing_symbol = missing_symbol.sum()
+        n_invalid_symbol = invalid_symbol.sum()
+
         # ---------------------------------------------------------
         # 7. Validate the var_id column
         # ---------------------------------------------------------
@@ -223,14 +234,29 @@ class ReadData:
             & ~missing_varid
         )
 
-        n_missing_symbol = missing_symbol.sum()
-        n_invalid_symbol = invalid_symbol.sum()
-        
         n_missing_varid = missing_varid.sum()
         n_invalid_varid = invalid_varid.sum()
 
         # ---------------------------------------------------------
-        # 7. Strict validation
+        # 8. Validate the drug_id column
+        # ---------------------------------------------------------
+
+        missing_drugid = result["drug_id"].isna()
+
+        # Convert values to strings where possible
+        converted_drugid = result["drug_id"].astype("string")
+
+        # A value is considered invalid if it is not a string
+        invalid_drugid = (
+            ~result["drug_id"].map(lambda x: isinstance(x, str))
+            & ~missing_drugid
+        )
+
+        n_missing_drugid = missing_drugid.sum()
+        n_invalid_drugid = invalid_drugid.sum()
+
+        # ---------------------------------------------------------
+        # 9. Strict validation
         # ---------------------------------------------------------
 
         if strict:
@@ -262,14 +288,25 @@ class ReadData:
             if n_missing_varid > 0:
                 problems.append(
                     f"{n_missing_varid} missing values in the "
-                    "symbol column"
+                    "var_id column"
                 )
 
             if n_invalid_varid > 0:
                 problems.append(
-                    f"{n_invalid_varid} symbol values are not strings"
+                    f"{n_invalid_varid} var_id values are not strings"
                 )
-            
+
+            if n_missing_drugid > 0:
+                problems.append(
+                    f"{n_missing_drugid} missing values in the "
+                    "drug_id column"
+                )
+
+            if n_invalid_drugid > 0:
+                problems.append(
+                    f"{n_invalid_drugid} drug_id values are not strings"
+                )
+
             if problems:
                 message = (
                     "Data validation failed:\n- "
@@ -282,7 +319,7 @@ class ReadData:
                 raise ValueError(message)
 
         # ---------------------------------------------------------
-        # 8. Lenient validation
+        # 10. Lenient validation
         # ---------------------------------------------------------
 
         else:
@@ -313,13 +350,23 @@ class ReadData:
             )
 
             logging.warning(
-                "Symbol values that are not strings: %d",
+                "var_id values that are not strings: %d",
                 n_invalid_varid,
             )
 
             logging.warning(
-                "Missing symbol values: %d",
+                "Missing var_id values: %d",
                 n_missing_varid,
+            )
+
+            logging.warning(
+                "drug_id values that are not strings: %d",
+                n_invalid_drugid,
+            )
+
+            logging.warning(
+                "Missing drug_id values: %d",
+                n_missing_drugid,
             )
 
             # Keep only rows with valid AF values
@@ -339,8 +386,15 @@ class ReadData:
                 )
             )
 
+            # Keep only rows with valid string drug_id
+            valid_drugid = (
+                result["drug_id"].map(
+                    lambda x: isinstance(x, str)
+                )
+            )
+
             # Apply the validation
-            valid_rows = valid_af & valid_symbol & valid_varid
+            valid_rows = valid_af & valid_symbol & valid_varid & valid_drugid
 
             result = result.loc[valid_rows].copy()
 
@@ -356,17 +410,22 @@ class ReadData:
 
             # Standardize var_id values as strings
             result["var_id"] = converted_varid.loc[
-                valid_varid
+                valid_rows
             ]
+
+            # Standardize drug_id values as strings
+            result["drug_id"] = converted_drugid.loc[
+                valid_rows
+            ]
+
         # ---------------------------------------------------------
-        # 9. Apply gene-symbol filtering
+        # 11. Apply gene-symbol filtering
         # ---------------------------------------------------------
 
         if gene_symbols is not None:
             result = result[
                 result["symbol"].isin(gene_symbols)
             ]
+
         print(result)
         return result
-
-

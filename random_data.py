@@ -3,6 +3,7 @@ import string
 import numpy as np
 import pandas as pd
 
+
 # -----------------------------
 # Parameters
 # -----------------------------
@@ -14,7 +15,10 @@ SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 
+
+# -----------------------------
 # Pool of gene symbols
+# -----------------------------
 gene_pool = [
     "ABCB1", "ABCC1", "ABCG2", "ACE", "ADH1B", "ADRB2", "APOE",
     "ATM", "BCHE", "CYP1A1", "CYP1A2", "CYP2B6", "CYP2C19",
@@ -29,11 +33,31 @@ gene_pool = [
 
 
 # -----------------------------
-# Generate random IDs
+# Pool of drug identifiers
+# -----------------------------
+drug_pool = [
+    "DB00001",
+    "DB00002",
+    "DB00003",
+    "DB00004",
+    "DB00005",
+    "DB00006",
+    "DB00007",
+    "DB00008",
+    "DB00009",
+    "DB00010"
+]
+
+
+# -----------------------------
+# Generate random variant IDs
 # -----------------------------
 def random_id(prefix="VAR", length=8):
     return prefix + "_" + "".join(
-        random.choices(string.ascii_uppercase + string.digits, k=length)
+        random.choices(
+            string.ascii_uppercase + string.digits,
+            k=length
+        )
     )
 
 
@@ -70,6 +94,7 @@ counts = {gene: 0 for gene in gene_pool}
 genes = []
 
 while len(genes) < N_ROWS:
+
     gene = random.choice(gene_pool)
 
     if counts[gene] < MAX_GENE_REPETITIONS:
@@ -78,19 +103,62 @@ while len(genes) < N_ROWS:
 
 
 # -----------------------------
+# Generate drug IDs
+#
+# Sampling with replacement means
+# the same drug can occur multiple
+# times in the dataframe.
+# -----------------------------
+drug_ids = random.choices(
+    drug_pool,
+    k=N_ROWS
+)
+
+
+# -----------------------------
 # Create dataframe
 # -----------------------------
 df = pd.DataFrame({
-    "id": [random_id() for _ in range(N_ROWS)],
+    "id": [
+        random_id()
+        for _ in range(N_ROWS)
+    ],
+
     "genes": genes,
-    "allele_freq": [random_allele_frequency() for _ in range(N_ROWS)]
+
+    "drug_id": drug_ids,
+
+    "allele_freq": [
+        random_allele_frequency()
+        for _ in range(N_ROWS)
+    ]
 })
 
-# Save CSV
-df.to_csv(OUTPUT_FILE, index=False)
 
+# -----------------------------
+# Save CSV
+# -----------------------------
+df.to_csv(
+    OUTPUT_FILE,
+    index=False
+)
+
+
+# -----------------------------
+# Display results
+# -----------------------------
 print(df.head())
-print(f"\nCSV written to: {OUTPUT_FILE}")
+
+print(
+    f"\nCSV written to: {OUTPUT_FILE}"
+)
 
 print("\nGene counts:")
-print(df["genes"].value_counts())
+print(
+    df["genes"].value_counts()
+)
+
+print("\nDrug counts:")
+print(
+    df["drug_id"].value_counts()
+)

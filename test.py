@@ -9,4 +9,4 @@ if __name__ == "__main__":
     file = ReadData("./gene_allele_frequency_50_rows.csv")
     
     print()
-    file.get_allele_frequency(mapping = {"AF":"allele_freq", "symbol":"genes", "var_id":"id"}, strict=False)
+    file.get_allele_frequency(mapping = {"AF":"allele_freq", "symbol":"genes", "var_id":"id", "drug_id":"drug_id"}, strict=False)
