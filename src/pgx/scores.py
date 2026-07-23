@@ -4,6 +4,14 @@ import numpy as np
 from .read_data import ReadData
 logger = logging.getLogger(__name__)
 
+_EVIDENCE_LEVEL_TO_SCORE = {
+        "1A": 5,
+        "1B": 4,
+        "2A": 3,
+        "2B": 2,
+        "3": 1,
+        "4": 0,
+    }
 
 class FunctionalVariantScorer:
     """
@@ -33,6 +41,10 @@ class FunctionalVariantScorer:
         self._drp_scores: pd.Series | None = None
         self._wcap_scores: pd.Series | None = None
         self._wdrp_scores: pd.Series | None = None
+        self._des_dominant_scores: pd.Series | None = None
+        self._des_recessive_scores: pd.Series | None = None
+        self._wdes_dominant_scores: pd.Series | None = None
+        self._wdes_recessive_scores: pd.Series | None = None
 
     def compute_CAP(self) -> pd.Series:
         """
@@ -332,3 +344,218 @@ class FunctionalVariantScorer:
 
         self._wdrp_scores = wdrp_scores
         return wdrp_scores
+
+    def compute_DES_dominant(self) -> pd.Series:
+        """
+        Compute the Drug Effect Score (DES) per drug under the dominant
+        model (carrying at least one risk allele is sufficient to alter
+        drug response).
+
+            DES_dominant(d) = prod_{a in D_d} (1 - AF(a))**2
+
+        where D_d is the set of distinct PGx SNPs affecting response to
+        drug d. Unlike CAP/DRP, DES is the product itself (representing
+        the probability an individual carries no risk alleles for drug d),
+        not its complement.
+
+        Returns
+        -------
+        pandas.Series
+            Indexed by drug_id, values are DES scores in [0, 1]. Name
+            of the series is "DES_dominant".
+        """
+        # A variant may appear on multiple rows (e.g., once per gene it's
+        # annotated to), but must contribute only once per drug.
+        distinct_variants = self.data.drop_duplicates(subset=["var_id", "drug_id"]).copy()
+
+        # DES(d) = prod(1 - AF)^2 = exp( sum( 2 * log(1 - AF) ) )
+        distinct_variants["_log_term"] = 2.0 * np.log1p(-distinct_variants["AF"])
+
+        log_sum_per_drug = distinct_variants.groupby("drug_id")["_log_term"].sum()
+        des_dominant_scores = np.exp(log_sum_per_drug).rename("DES_dominant")
+
+        self._des_dominant_scores = des_dominant_scores
+        return des_dominant_scores
+
+    def compute_DES_recessive(self) -> pd.Series:
+        """
+        Compute the Drug Effect Score (DES) per drug under the recessive
+        model (two copies of a risk allele are required to alter drug
+        response).
+
+            DES_recessive(d) = prod_{a in D_d} (1 - AF(a)**2)
+
+        where D_d is the set of distinct PGx SNPs affecting response to
+        drug d.
+
+        Returns
+        -------
+        pandas.Series
+            Indexed by drug_id, values are DES scores in [0, 1]. Name
+            of the series is "DES_recessive".
+        """
+        distinct_variants = self.data.drop_duplicates(subset=["var_id", "drug_id"]).copy()
+
+        # DES(d) = prod(1 - AF^2) = exp( sum( log(1 - AF^2) ) )
+        distinct_variants["_log_term"] = np.log1p(-distinct_variants["AF"] ** 2)
+
+        log_sum_per_drug = distinct_variants.groupby("drug_id")["_log_term"].sum()
+        des_recessive_scores = np.exp(log_sum_per_drug).rename("DES_recessive")
+
+        self._des_recessive_scores = des_recessive_scores
+        return des_recessive_scores
+
+    def compute_wDES_dominant(self, evidence_path: str, alpha: float = 1.5, beta: float = 2.5) -> pd.Series:
+        """
+        Compute the weighted Drug Effect Score (wDES) per drug under the
+        dominant model, down-weighting variants by evidence-level confidence.
+
+            w(a)   = 1 / (1 + exp{-alpha * (S(a) - beta)})
+            wDES_dominant(d) = prod_{a in D_d} (1 - AF(a))**(2 * w(a))
+
+        Parameters
+        ----------
+        evidence_path : str
+            Path to a CSV, TSV, or Excel file with at least the columns
+            "var_id", "drug_id", "evidence_level". Values in
+            "evidence_level" must be one of {"1A","1B","2A","2B","3","4"}.
+        alpha, beta : float
+            Sigmoid steepness and inflection-point parameters (defaults
+            1.5 and 2.5, per the paper's sensitivity analysis).
+
+        Returns
+        -------
+        pandas.Series
+            Indexed by drug_id, values are wDES scores in [0, 1]. Name
+            of the series is "wDES_dominant".
+
+        Raises
+        ------
+        ValueError
+            If the evidence file is missing required columns, contains
+            invalid evidence_level values, or is missing an entry for
+            any (var_id, drug_id) pair present in self.data.
+        """
+        weighted = self._prepare_wdes_variants(evidence_path, alpha, beta)
+
+        # wDES_dominant(d) = prod((1-AF)^(2w)) = exp( sum( 2*w*log(1-AF) ) )
+        weighted["_log_term"] = 2.0 * weighted["_weight"] * np.log1p(-weighted["AF"])
+        log_sum_per_drug = weighted.groupby("drug_id")["_log_term"].sum()
+        wdes_dominant_scores = np.exp(log_sum_per_drug).rename("wDES_dominant")
+
+        self._wdes_dominant_scores = wdes_dominant_scores
+        return wdes_dominant_scores
+
+    def compute_wDES_recessive(
+        self, evidence_path: str, alpha: float = 1.5, beta: float = 2.5
+    ) -> pd.Series:
+        """
+        Compute the weighted Drug Effect Score (wDES) per drug under the
+        recessive model, down-weighting variants by evidence-level confidence.
+
+            w(a)   = 1 / (1 + exp{-alpha * (S(a) - beta)})
+            wDES_recessive(d) = prod_{a in D_d} (1 - AF(a)**2)**w(a)
+
+        Parameters, Returns, and Raises: see ``compute_wDES_dominant``.
+        """
+        weighted = self._prepare_wdes_variants(evidence_path, alpha, beta)
+
+        # wDES_recessive(d) = prod((1-AF^2)^w) = exp( sum( w*log(1-AF^2) ) )
+        weighted["_log_term"] = weighted["_weight"] * np.log1p(-weighted["AF"] ** 2)
+        log_sum_per_drug = weighted.groupby("drug_id")["_log_term"].sum()
+        wdes_recessive_scores = np.exp(log_sum_per_drug).rename("wDES_recessive")
+
+        self._wdes_recessive_scores = wdes_recessive_scores
+        return wdes_recessive_scores
+
+    def _prepare_wdes_variants(
+        self, evidence_path: str, alpha: float, beta: float
+    ) -> pd.DataFrame:
+        """
+        Merge self.data with per-(var_id, drug_id) evidence levels and
+        compute the sigmoid weight w(a) for each distinct variant-drug pair.
+
+        Shared setup logic for compute_wDES_dominant and
+        compute_wDES_recessive.
+        """
+        # A variant must contribute only once per drug (mirrors compute_DES_*).
+        distinct_variants = self.data.drop_duplicates(subset=["var_id", "drug_id"]).copy()
+
+        evidence = self._load_evidence_levels(evidence_path)
+
+        merged = distinct_variants.merge(evidence, on=["var_id", "drug_id"], how="left")
+
+        missing_mask = merged["evidence_level"].isna()
+        if missing_mask.any():
+            missing_pairs = (
+                merged.loc[missing_mask, ["var_id", "drug_id"]]
+                .drop_duplicates()
+                .itertuples(index=False)
+            )
+            pairs_str = ", ".join(f"({v}, {d})" for v, d in missing_pairs)
+            raise ValueError(
+                "The following (var_id, drug_id) pair(s) present in the "
+                f"data have no matching evidence_level in "
+                f"'{evidence_path}': {pairs_str}"
+            )
+
+        merged["_score"] = merged["evidence_level"].map(self._EVIDENCE_LEVEL_TO_SCORE)
+        merged["_weight"] = 1.0 / (1.0 + np.exp(-alpha * (merged["_score"] - beta)))
+
+        return merged
+
+    @staticmethod
+    def _load_evidence_levels(evidence_path: str) -> pd.DataFrame:
+        """
+        Load and validate a variant-drug evidence-level file.
+
+        Accepts .csv, .tsv, or Excel (.xlsx/.xls) files. Must contain
+        "var_id", "drug_id", and "evidence_level" columns. Values in
+        "evidence_level" must be one of {"1A","1B","2A","2B","3","4"}.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Deduplicated ["var_id", "drug_id", "evidence_level"] table.
+
+        Raises
+        ------
+        ValueError
+            If required columns are missing, the file extension is
+            unsupported, or invalid evidence_level values are present.
+        """
+        suffix = evidence_path.rsplit(".", 1)[-1].lower()
+        if suffix in ("xlsx", "xls"):
+            evidence = pd.read_excel(evidence_path)
+        elif suffix == "tsv":
+            evidence = pd.read_csv(evidence_path, sep="\t")
+        elif suffix == "csv":
+            evidence = pd.read_csv(evidence_path)
+        else:
+            raise ValueError(
+                f"Unsupported file extension '.{suffix}' for evidence "
+                "level file. Expected .csv, .tsv, .xlsx, or .xls."
+            )
+
+        required_cols = {"var_id", "drug_id", "evidence_level"}
+        missing_cols = required_cols - set(evidence.columns)
+        if missing_cols:
+            raise ValueError(
+                "Evidence level file is missing required column(s): "
+                f"{', '.join(sorted(missing_cols))}. Expected columns: "
+                f"{', '.join(sorted(required_cols))}."
+            )
+
+        evidence = evidence[["var_id", "drug_id", "evidence_level"]].drop_duplicates().copy()
+        evidence["evidence_level"] = evidence["evidence_level"].astype(str).str.strip()
+
+        allowed_levels = set(FunctionalVariantScorer._EVIDENCE_LEVEL_TO_SCORE.keys())
+        invalid_mask = ~evidence["evidence_level"].isin(allowed_levels)
+        if invalid_mask.any():
+            invalid_values = sorted(evidence.loc[invalid_mask, "evidence_level"].unique())
+            raise ValueError(
+                f"Invalid evidence_level value(s) found: {invalid_values}. "
+                f"Allowed values are: {sorted(allowed_levels)}."
+            )
+
+        return evidence
